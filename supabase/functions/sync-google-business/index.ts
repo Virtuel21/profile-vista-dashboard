@@ -8,6 +8,9 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
+// Add delay function for rate limiting
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -163,16 +166,57 @@ serve(async (req) => {
 
     console.log('Using Google access token for API calls...');
 
-    // Fetch Google Business Profile accounts
-    const accountsResponse = await fetch(
-      'https://mybusinessbusinessinformation.googleapis.com/v1/accounts',
-      {
-        headers: {
-          'Authorization': `Bearer ${googleAccessToken}`,
-          'Content-Type': 'application/json',
-        },
+    // Add rate limiting delay before API calls
+    await delay(1000); // 1 second delay to avoid rate limits
+
+    // Fetch Google Business Profile accounts with retry logic
+    let accountsResponse;
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    while (retryCount < maxRetries) {
+      accountsResponse = await fetch(
+        'https://mybusinessbusinessinformation.googleapis.com/v1/accounts',
+        {
+          headers: {
+            'Authorization': `Bearer ${googleAccessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (accountsResponse.status === 429) {
+        // Rate limit hit, wait and retry
+        retryCount++;
+        console.log(`Rate limit hit, retrying in ${retryCount * 2} seconds... (attempt ${retryCount}/${maxRetries})`);
+        
+        if (retryCount < maxRetries) {
+          await delay(retryCount * 2000); // Exponential backoff: 2s, 4s, 6s
+          continue;
+        } else {
+          // Max retries reached
+          console.error('Max retries reached for rate limit');
+          return new Response(
+            JSON.stringify({ 
+              error: 'Google API rate limit exceeded. Please try again in a few minutes.',
+              code: 'RATE_LIMIT_EXCEEDED',
+              retryAfter: 60 // seconds
+            }),
+            { 
+              status: 429,
+              headers: { 
+                ...corsHeaders, 
+                'Content-Type': 'application/json',
+                'Retry-After': '60'
+              } 
+            }
+          );
+        }
       }
-    );
+      
+      // If not rate limited, break out of retry loop
+      break;
+    }
 
     if (!accountsResponse.ok) {
       const errorText = await accountsResponse.text();
@@ -212,12 +256,15 @@ serve(async (req) => {
     const accountsData = await accountsResponse.json();
     console.log('Fetched Google Business accounts:', accountsData);
 
-    // Fetch locations for each account
+    // Fetch locations for each account with rate limiting
     let allLocations = [];
     
     if (accountsData.accounts && accountsData.accounts.length > 0) {
       for (const account of accountsData.accounts) {
         console.log('Fetching locations for account:', account.name);
+        
+        // Add delay between requests to avoid rate limits
+        await delay(1500);
         
         const locationsResponse = await fetch(
           `https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations`,
@@ -234,6 +281,10 @@ serve(async (req) => {
           if (locationsData.locations) {
             allLocations.push(...locationsData.locations);
           }
+        } else if (locationsResponse.status === 429) {
+          console.error('Rate limit hit while fetching locations for account:', account.name);
+          // Skip this account for now
+          continue;
         } else {
           console.error('Error fetching locations for account:', account.name, await locationsResponse.text());
         }
@@ -279,7 +330,8 @@ serve(async (req) => {
       timestamp: new Date().toISOString(),
       accountsCount: accountsData.accounts?.length || 0,
       locationsCount: processedCount,
-      totalLocationsFound: allLocations.length
+      totalLocationsFound: allLocations.length,
+      note: allLocations.length === 0 ? 'No locations found. Make sure you have Google Business Profile locations set up.' : undefined
     };
 
     return new Response(
