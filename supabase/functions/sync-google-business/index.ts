@@ -80,6 +80,9 @@ serve(async (req) => {
       );
     }
 
+    console.log('User metadata:', JSON.stringify(user.user_metadata, null, 2));
+    console.log('App metadata:', JSON.stringify(user.app_metadata, null, 2));
+
     // Try to get the Google access token from various sources
     let googleAccessToken = null;
     
@@ -93,6 +96,30 @@ serve(async (req) => {
     if (!googleAccessToken && user.app_metadata?.provider_token) {
       googleAccessToken = user.app_metadata.provider_token;
       console.log('Found provider token in app_metadata');
+    }
+
+    // Try to get user identities using service role
+    if (!googleAccessToken) {
+      console.log('Attempting to get user identities...');
+      
+      try {
+        const { data: userIdentities, error: identitiesError } = await supabaseClient.auth.admin.getUserById(userId);
+        
+        if (userIdentities && userIdentities.user) {
+          console.log('User identities:', JSON.stringify(userIdentities.user.identities, null, 2));
+          
+          const googleIdentity = userIdentities.user.identities?.find(
+            (identity: any) => identity.provider === 'google'
+          );
+          
+          if (googleIdentity && googleIdentity.identity_data?.provider_token) {
+            googleAccessToken = googleIdentity.identity_data.provider_token;
+            console.log('Found provider token in identities');
+          }
+        }
+      } catch (identityError) {
+        console.error('Error getting user identities:', identityError);
+      }
     }
 
     // Try to get fresh token using refresh token if available
@@ -136,7 +163,7 @@ serve(async (req) => {
       console.error('No valid Google access token found');
       return new Response(
         JSON.stringify({ 
-          error: 'No valid Google access token found. Please re-authenticate with Google.',
+          error: 'No valid Google access token found. Please sign out and sign back in with Google to refresh your tokens.',
           requiresReauth: true
         }),
         { 
@@ -169,7 +196,7 @@ serve(async (req) => {
       if (accountsResponse.status === 401) {
         return new Response(
           JSON.stringify({ 
-            error: 'Google API authentication failed. Please re-authenticate with Google.',
+            error: 'Google API authentication failed. Please sign out and sign back in with Google.',
             requiresReauth: true
           }),
           { 
@@ -246,7 +273,7 @@ serve(async (req) => {
         department: 'main'
       };
 
-      // Upsert location - we'll use a simple insert with ON CONFLICT handling
+      // Upsert location
       const { error: locationError } = await supabaseClient
         .from('business_locations')
         .upsert(locationData, { 

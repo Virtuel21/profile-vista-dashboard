@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, AlertCircle } from 'lucide-react';
 
 interface GoogleAccount {
   id: string;
@@ -29,7 +29,8 @@ export function GoogleConnect() {
   const [businessLocations, setBusinessLocations] = useState<BusinessLocation[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [initializing, setInitializing] = useState(true);
-  const { user, session } = useAuth();
+  const [authError, setAuthError] = useState<string | null>(null);
+  const { user, session, signInWithGoogle } = useAuth();
   const { toast } = useToast();
 
   useEffect(() => {
@@ -101,6 +102,8 @@ export function GoogleConnect() {
 
   const syncBusinessData = async () => {
     setSyncing(true);
+    setAuthError(null);
+    
     try {
       // Get the session token for authorization
       const { data: { session: currentSession } } = await supabase.auth.getSession();
@@ -119,6 +122,16 @@ export function GoogleConnect() {
 
       if (error) throw error;
 
+      if (data?.requiresReauth) {
+        setAuthError(data.error);
+        toast({
+          title: "Re-authentication Required",
+          description: "Please sign out and sign back in with Google to refresh your access tokens.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       toast({
         title: "Success",
         description: data.message || "Business data synced successfully",
@@ -128,13 +141,40 @@ export function GoogleConnect() {
       await fetchBusinessLocations();
     } catch (error) {
       console.error('Sync error:', error);
+      
+      if (error.message?.includes('requiresReauth') || error.message?.includes('401')) {
+        setAuthError("Your Google authentication has expired. Please sign out and sign back in.");
+        toast({
+          title: "Authentication Expired",
+          description: "Please sign out and sign back in with Google to refresh your access.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Sync Error",
+          description: error.message || "Failed to sync business data. Make sure you have Google Business Profile access.",
+          variant: "destructive",
+        });
+      }
+    }
+    setSyncing(false);
+  };
+
+  const handleReAuthenticate = async () => {
+    try {
+      // Sign out first
+      await supabase.auth.signOut();
+      
+      // Redirect to auth page or trigger Google sign in
+      window.location.href = '/auth';
+    } catch (error) {
+      console.error('Error during re-authentication:', error);
       toast({
-        title: "Sync Error",
-        description: error.message || "Failed to sync business data. Make sure you have Google Business Profile access.",
+        title: "Error",
+        description: "Failed to initiate re-authentication. Please try refreshing the page.",
         variant: "destructive",
       });
     }
-    setSyncing(false);
   };
 
   if (initializing) {
@@ -161,6 +201,24 @@ export function GoogleConnect() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {authError && (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+              <div className="flex items-center gap-2 text-red-700">
+                <AlertCircle className="w-5 h-5" />
+                <span className="font-medium">Authentication Issue</span>
+              </div>
+              <p className="mt-2 text-red-600 text-sm">{authError}</p>
+              <Button 
+                onClick={handleReAuthenticate}
+                variant="outline"
+                size="sm"
+                className="mt-3 border-red-300 text-red-700 hover:bg-red-50"
+              >
+                Re-authenticate with Google
+              </Button>
+            </div>
+          )}
+          
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -174,7 +232,7 @@ export function GoogleConnect() {
               </div>
               <Button
                 onClick={syncBusinessData}
-                disabled={syncing}
+                disabled={syncing || !!authError}
                 variant="outline"
                 size="sm"
               >
