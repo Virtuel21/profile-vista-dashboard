@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -5,12 +6,13 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { RefreshCw, AlertCircle } from 'lucide-react';
+import { RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
 
 interface GoogleAccount {
   id: string;
   email: string;
   google_account_id: string;
+  access_token: string;
   created_at: string;
 }
 
@@ -36,35 +38,10 @@ export function GoogleConnect() {
     if (user) {
       initializeGoogleAccount();
     }
-  }, [user]);
+  }, [user, session]);
 
   const initializeGoogleAccount = async () => {
     try {
-      // Check if Google account already exists
-      const { data: existingAccounts } = await supabase
-        .from('google_accounts')
-        .select('*')
-        .eq('user_id', user?.id);
-
-      if (!existingAccounts || existingAccounts.length === 0) {
-        // Create Google account record automatically since user signed in with Google
-        const googleAccountData = {
-          user_id: user?.id,
-          email: user?.email || '',
-          google_account_id: user?.user_metadata?.sub || user?.id || '',
-        };
-
-        const { error } = await supabase
-          .from('google_accounts')
-          .insert([googleAccountData]);
-
-        if (error) {
-          console.error('Error creating Google account:', error);
-        } else {
-          console.log('Google account created successfully');
-        }
-      }
-
       await fetchGoogleAccounts();
       await fetchBusinessLocations();
     } catch (error) {
@@ -104,8 +81,6 @@ export function GoogleConnect() {
     setAuthError(null);
     
     try {
-      // Call edge function without custom authorization header
-      // Supabase automatically handles authentication
       const { data, error } = await supabase.functions.invoke('sync-google-business', {
         body: { userId: user?.id },
       });
@@ -155,7 +130,7 @@ export function GoogleConnect() {
       // Sign out first
       await supabase.auth.signOut();
       
-      // Redirect to auth page or trigger Google sign in
+      // Redirect to auth page
       window.location.href = '/auth';
     } catch (error) {
       console.error('Error during re-authentication:', error);
@@ -182,6 +157,9 @@ export function GoogleConnect() {
     );
   }
 
+  // Check if user has valid Google tokens
+  const hasValidTokens = googleAccounts.length > 0 && googleAccounts.some(account => account.access_token);
+
   return (
     <div className="space-y-6">
       <Card className="bg-white/50 backdrop-blur-xl border-white/20 shadow-xl">
@@ -191,6 +169,36 @@ export function GoogleConnect() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {!hasValidTokens ? (
+            <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <div className="flex items-center gap-2 text-yellow-700">
+                <AlertCircle className="w-5 h-5" />
+                <span className="font-medium">Google Tokens Missing</span>
+              </div>
+              <p className="mt-2 text-yellow-600 text-sm">
+                No valid Google access tokens found. Please sign out and sign back in with Google to grant proper permissions.
+              </p>
+              <Button 
+                onClick={handleReAuthenticate}
+                variant="outline"
+                size="sm"
+                className="mt-3 border-yellow-300 text-yellow-700 hover:bg-yellow-50"
+              >
+                Re-authenticate with Google
+              </Button>
+            </div>
+          ) : (
+            <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+              <div className="flex items-center gap-2 text-green-700">
+                <CheckCircle className="w-5 h-5" />
+                <span className="font-medium">Google Connection Active</span>
+              </div>
+              <p className="mt-2 text-green-600 text-sm">
+                Valid Google access tokens found. You can now sync your business data.
+              </p>
+            </div>
+          )}
+
           {authError && (
             <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
               <div className="flex items-center gap-2 text-red-700">
@@ -216,13 +224,18 @@ export function GoogleConnect() {
                 {googleAccounts.map((account) => (
                   <div key={account.id} className="flex items-center gap-2 mt-2">
                     <Badge variant="secondary">{account.email}</Badge>
-                    <Badge variant="outline" className="text-green-600">Connected</Badge>
+                    <Badge variant="outline" className={hasValidTokens ? "text-green-600" : "text-red-600"}>
+                      {hasValidTokens ? "Connected" : "No Tokens"}
+                    </Badge>
                   </div>
                 ))}
+                {googleAccounts.length === 0 && (
+                  <p className="text-sm text-slate-500 mt-2">No Google account connected</p>
+                )}
               </div>
               <Button
                 onClick={syncBusinessData}
-                disabled={syncing || !!authError}
+                disabled={syncing || !hasValidTokens}
                 variant="outline"
                 size="sm"
               >
