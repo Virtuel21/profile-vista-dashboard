@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -105,19 +104,10 @@ export function GoogleConnect() {
     setAuthError(null);
     
     try {
-      // Get the session token for authorization
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
-      
-      if (!currentSession?.access_token) {
-        throw new Error('No valid session found');
-      }
-
-      // Call edge function with authorization header
+      // Call edge function without custom authorization header
+      // Supabase automatically handles authentication
       const { data, error } = await supabase.functions.invoke('sync-google-business', {
         body: { userId: user?.id },
-        headers: {
-          Authorization: `Bearer ${currentSession.access_token}`,
-        },
       });
 
       if (error) throw error;

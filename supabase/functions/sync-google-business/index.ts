@@ -24,11 +24,58 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
+    // Get the authenticated user from the request context
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: 'No authorization provided' }),
+        { 
+          status: 401,
+          headers: { 
+            ...corsHeaders, 
+            'Content-Type': 'application/json' 
+          } 
+        }
+      );
+    }
+
+    // Create a client with the user's JWT for authentication
+    const userSupabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: {
+            Authorization: authHeader,
+          },
+        },
+      }
+    );
+
+    // Verify the user is authenticated
+    const { data: { user }, error: userError } = await userSupabaseClient.auth.getUser();
+    
+    if (userError || !user) {
+      console.error('Error getting user:', userError);
+      return new Response(
+        JSON.stringify({ error: 'Invalid user token' }),
+        { 
+          status: 401,
+          headers: { 
+            ...corsHeaders, 
+            'Content-Type': 'application/json' 
+          } 
+        }
+      );
+    }
+
+    console.log('Authenticated user:', user.id);
+
     // Get user's Google account with tokens
     const { data: googleAccount, error: accountError } = await supabaseClient
       .from('google_accounts')
       .select('*')
-      .eq('user_id', userId)
+      .eq('user_id', user.id)
       .single();
 
     if (accountError || !googleAccount) {
@@ -45,84 +92,22 @@ serve(async (req) => {
       );
     }
 
-    // Get access token from request headers
-    const authHeader = req.headers.get('Authorization');
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ error: 'No authorization header' }),
-        { 
-          status: 401,
-          headers: { 
-            ...corsHeaders, 
-            'Content-Type': 'application/json' 
-          } 
-        }
-      );
-    }
+    console.log('Found Google account for user:', googleAccount.email);
 
-    // Extract the JWT token
-    const token = authHeader.replace('Bearer ', '');
-    
-    // Get user session to access provider token
-    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token);
-    
-    if (userError || !user) {
-      console.error('Error getting user:', userError);
-      return new Response(
-        JSON.stringify({ error: 'Invalid user token' }),
-        { 
-          status: 401,
-          headers: { 
-            ...corsHeaders, 
-            'Content-Type': 'application/json' 
-          } 
-        }
-      );
-    }
-
-    console.log('User metadata:', JSON.stringify(user.user_metadata, null, 2));
-    console.log('App metadata:', JSON.stringify(user.app_metadata, null, 2));
-
-    // Try to get the Google access token from various sources
+    // Try to get Google access token from various sources
     let googleAccessToken = null;
     
-    // Check user metadata first
-    if (user.user_metadata?.provider_token) {
-      googleAccessToken = user.user_metadata.provider_token;
-      console.log('Found provider token in user_metadata');
-    }
-    
-    // Check app metadata
-    if (!googleAccessToken && user.app_metadata?.provider_token) {
-      googleAccessToken = user.app_metadata.provider_token;
-      console.log('Found provider token in app_metadata');
-    }
-
-    // Try to get user identities using service role
-    if (!googleAccessToken) {
-      console.log('Attempting to get user identities...');
-      
-      try {
-        const { data: userIdentities, error: identitiesError } = await supabaseClient.auth.admin.getUserById(userId);
-        
-        if (userIdentities && userIdentities.user) {
-          console.log('User identities:', JSON.stringify(userIdentities.user.identities, null, 2));
-          
-          const googleIdentity = userIdentities.user.identities?.find(
-            (identity: any) => identity.provider === 'google'
-          );
-          
-          if (googleIdentity && googleIdentity.identity_data?.provider_token) {
-            googleAccessToken = googleIdentity.identity_data.provider_token;
-            console.log('Found provider token in identities');
-          }
-        }
-      } catch (identityError) {
-        console.error('Error getting user identities:', identityError);
+    // Check if we have a stored access token
+    if (googleAccount.access_token) {
+      // Check if token is still valid
+      const tokenResponse = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + googleAccount.access_token);
+      if (tokenResponse.ok) {
+        googleAccessToken = googleAccount.access_token;
+        console.log('Using stored access token');
       }
     }
 
-    // Try to get fresh token using refresh token if available
+    // Try to refresh token if we have a refresh token
     if (!googleAccessToken && googleAccount.refresh_token) {
       console.log('Attempting to refresh Google access token...');
       
