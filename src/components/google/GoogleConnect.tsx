@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { RefreshCw, ExternalLink } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
 interface GoogleAccount {
   id: string;
@@ -27,17 +27,52 @@ interface BusinessLocation {
 export function GoogleConnect() {
   const [googleAccounts, setGoogleAccounts] = useState<GoogleAccount[]>([]);
   const [businessLocations, setBusinessLocations] = useState<BusinessLocation[]>([]);
-  const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [initializing, setInitializing] = useState(true);
   const { user } = useAuth();
   const { toast } = useToast();
 
   useEffect(() => {
     if (user) {
-      fetchGoogleAccounts();
-      fetchBusinessLocations();
+      initializeGoogleAccount();
     }
   }, [user]);
+
+  const initializeGoogleAccount = async () => {
+    try {
+      // Check if Google account already exists
+      const { data: existingAccounts } = await supabase
+        .from('google_accounts')
+        .select('*')
+        .eq('user_id', user?.id);
+
+      if (!existingAccounts || existingAccounts.length === 0) {
+        // Create Google account record automatically since user signed in with Google
+        const googleAccountData = {
+          user_id: user?.id,
+          email: user?.email || '',
+          google_account_id: user?.user_metadata?.sub || user?.id || '',
+        };
+
+        const { error } = await supabase
+          .from('google_accounts')
+          .insert([googleAccountData]);
+
+        if (error) {
+          console.error('Error creating Google account:', error);
+        } else {
+          console.log('Google account created successfully');
+        }
+      }
+
+      await fetchGoogleAccounts();
+      await fetchBusinessLocations();
+    } catch (error) {
+      console.error('Error initializing Google account:', error);
+    } finally {
+      setInitializing(false);
+    }
+  };
 
   const fetchGoogleAccounts = async () => {
     const { data, error } = await supabase
@@ -62,39 +97,6 @@ export function GoogleConnect() {
     } else {
       setBusinessLocations(data || []);
     }
-  };
-
-  const connectGoogleAccount = async () => {
-    setLoading(true);
-    try {
-      // For demo purposes, we'll simulate adding a Google account
-      // In a real implementation, this would use Google OAuth
-      const demoAccount = {
-        user_id: user?.id,
-        email: 'demo@business.com',
-        google_account_id: 'demo_account_' + Date.now(),
-      };
-
-      const { error } = await supabase
-        .from('google_accounts')
-        .insert([demoAccount]);
-
-      if (error) throw error;
-
-      toast({
-        title: "Success",
-        description: "Google account connected successfully",
-      });
-
-      fetchGoogleAccounts();
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to connect Google account",
-        variant: "destructive",
-      });
-    }
-    setLoading(false);
   };
 
   const syncBusinessData = async () => {
@@ -203,6 +205,21 @@ export function GoogleConnect() {
     }
   };
 
+  if (initializing) {
+    return (
+      <div className="space-y-6">
+        <Card className="bg-white/50 backdrop-blur-xl border-white/20 shadow-xl">
+          <CardContent className="p-6">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <p className="text-slate-600">Setting up your Google Business Profile connection...</p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <Card className="bg-white/50 backdrop-blur-xl border-white/20 shadow-xl">
@@ -212,62 +229,47 @@ export function GoogleConnect() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {googleAccounts.length === 0 ? (
-            <div className="text-center py-6">
-              <p className="text-slate-600 mb-4">
-                Connect your Google account to access real business metrics
-              </p>
-              <Button 
-                onClick={connectGoogleAccount}
-                disabled={loading}
-                className="bg-gradient-to-r from-blue-600 to-indigo-600"
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-slate-800">Connected Google Account</h3>
+                {googleAccounts.map((account) => (
+                  <div key={account.id} className="flex items-center gap-2 mt-2">
+                    <Badge variant="secondary">{account.email}</Badge>
+                    <Badge variant="outline" className="text-green-600">Connected</Badge>
+                  </div>
+                ))}
+              </div>
+              <Button
+                onClick={syncBusinessData}
+                disabled={syncing}
+                variant="outline"
+                size="sm"
               >
-                {loading ? 'Connecting...' : 'Connect Google Account'}
+                <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
+                {syncing ? 'Syncing...' : 'Sync Data'}
               </Button>
             </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="font-semibold text-slate-800">Connected Accounts</h3>
-                  {googleAccounts.map((account) => (
-                    <div key={account.id} className="flex items-center gap-2 mt-2">
-                      <Badge variant="secondary">{account.email}</Badge>
-                      <Badge variant="outline" className="text-green-600">Connected</Badge>
+
+            {businessLocations.length > 0 && (
+              <div className="mt-4">
+                <h4 className="font-medium text-slate-700 mb-2">Business Locations</h4>
+                <div className="space-y-2">
+                  {businessLocations.map((location) => (
+                    <div key={location.id} className="p-3 bg-white/30 rounded-lg">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-medium text-slate-800">{location.name}</p>
+                          <p className="text-sm text-slate-600">{location.address}, {location.city}</p>
+                        </div>
+                        <Badge variant="outline" className="text-blue-600">Active</Badge>
+                      </div>
                     </div>
                   ))}
                 </div>
-                <Button
-                  onClick={syncBusinessData}
-                  disabled={syncing}
-                  variant="outline"
-                  size="sm"
-                >
-                  <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-                  {syncing ? 'Syncing...' : 'Sync Data'}
-                </Button>
               </div>
-
-              {businessLocations.length > 0 && (
-                <div className="mt-4">
-                  <h4 className="font-medium text-slate-700 mb-2">Business Locations</h4>
-                  <div className="space-y-2">
-                    {businessLocations.map((location) => (
-                      <div key={location.id} className="p-3 bg-white/30 rounded-lg">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium text-slate-800">{location.name}</p>
-                            <p className="text-sm text-slate-600">{location.address}, {location.city}</p>
-                          </div>
-                          <Badge variant="outline" className="text-blue-600">Active</Badge>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>
