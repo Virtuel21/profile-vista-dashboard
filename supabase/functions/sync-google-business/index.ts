@@ -80,19 +80,67 @@ serve(async (req) => {
       );
     }
 
-    // For Google OAuth in Supabase, we need to get a fresh token
-    // Since the provider tokens are not reliably stored, we'll use the Google My Business API key
-    const googleApiKey = Deno.env.get('GOOGLE_MY_BUSINESS_API_KEY');
+    // Try to get the Google access token from various sources
+    let googleAccessToken = null;
     
-    if (!googleApiKey) {
-      console.error('Google My Business API key not configured');
+    // Check user metadata first
+    if (user.user_metadata?.provider_token) {
+      googleAccessToken = user.user_metadata.provider_token;
+      console.log('Found provider token in user_metadata');
+    }
+    
+    // Check app metadata
+    if (!googleAccessToken && user.app_metadata?.provider_token) {
+      googleAccessToken = user.app_metadata.provider_token;
+      console.log('Found provider token in app_metadata');
+    }
+
+    // Try to get fresh token using refresh token if available
+    if (!googleAccessToken && googleAccount.refresh_token) {
+      console.log('Attempting to refresh Google access token...');
+      
+      const refreshResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          client_id: Deno.env.get('GOOGLE_CLIENT_ID') || '',
+          client_secret: Deno.env.get('GOOGLE_CLIENT_SECRET') || '',
+          refresh_token: googleAccount.refresh_token,
+          grant_type: 'refresh_token',
+        }),
+      });
+
+      if (refreshResponse.ok) {
+        const tokenData = await refreshResponse.json();
+        googleAccessToken = tokenData.access_token;
+        
+        // Update the stored access token
+        await supabaseClient
+          .from('google_accounts')
+          .update({
+            access_token: googleAccessToken,
+            token_expires_at: new Date(Date.now() + (tokenData.expires_in * 1000)).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', googleAccount.id);
+          
+        console.log('Successfully refreshed Google access token');
+      } else {
+        console.error('Failed to refresh token:', await refreshResponse.text());
+      }
+    }
+
+    if (!googleAccessToken) {
+      console.error('No valid Google access token found');
       return new Response(
         JSON.stringify({ 
-          error: 'Google My Business API key not configured. Please contact administrator.',
-          details: 'GOOGLE_MY_BUSINESS_API_KEY environment variable is missing'
+          error: 'No valid Google access token found. Please re-authenticate with Google.',
+          requiresReauth: true
         }),
         { 
-          status: 500,
+          status: 401,
           headers: { 
             ...corsHeaders, 
             'Content-Type': 'application/json' 
@@ -101,77 +149,125 @@ serve(async (req) => {
       );
     }
 
-    console.log('Using Google My Business API key for authentication...');
+    console.log('Using Google access token for API calls...');
 
-    // Try to fetch Google Business Profile accounts using the API key
-    // Note: For actual Google Business Profile data, you typically need OAuth tokens
-    // But for testing, we can simulate the process and return mock data
+    // Fetch Google Business Profile accounts
+    const accountsResponse = await fetch(
+      'https://mybusinessbusinessinformation.googleapis.com/v1/accounts',
+      {
+        headers: {
+          'Authorization': `Bearer ${googleAccessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (!accountsResponse.ok) {
+      const errorText = await accountsResponse.text();
+      console.error('Error fetching Google Business accounts:', errorText);
+      
+      if (accountsResponse.status === 401) {
+        return new Response(
+          JSON.stringify({ 
+            error: 'Google API authentication failed. Please re-authenticate with Google.',
+            requiresReauth: true
+          }),
+          { 
+            status: 401,
+            headers: { 
+              ...corsHeaders, 
+              'Content-Type': 'application/json' 
+            } 
+          }
+        );
+      }
+      
+      return new Response(
+        JSON.stringify({ 
+          error: 'Failed to fetch Google Business accounts',
+          details: errorText
+        }),
+        { 
+          status: accountsResponse.status,
+          headers: { 
+            ...corsHeaders, 
+            'Content-Type': 'application/json' 
+          } 
+        }
+      );
+    }
+
+    const accountsData = await accountsResponse.json();
+    console.log('Fetched Google Business accounts:', accountsData);
+
+    // Fetch locations for each account
+    let allLocations = [];
     
-    // For now, let's create some sample business data to test the flow
-    const mockAccountsData = {
-      accounts: [
-        {
-          name: `accounts/${user.id}`,
-          accountName: user.email || 'Business Account',
-          type: 'PERSONAL'
-        }
-      ]
-    };
+    if (accountsData.accounts && accountsData.accounts.length > 0) {
+      for (const account of accountsData.accounts) {
+        console.log('Fetching locations for account:', account.name);
+        
+        const locationsResponse = await fetch(
+          `https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations`,
+          {
+            headers: {
+              'Authorization': `Bearer ${googleAccessToken}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
 
-    const mockLocationsData = {
-      locations: [
-        {
-          name: `accounts/${user.id}/locations/sample-location`,
-          title: 'Sample Business Location',
-          storefrontAddress: {
-            addressLines: ['123 Main Street'],
-            locality: 'Sample City'
-          },
-          primaryPhone: '+1234567890',
-          websiteUri: 'https://example.com'
+        if (locationsResponse.ok) {
+          const locationsData = await locationsResponse.json();
+          if (locationsData.locations) {
+            allLocations.push(...locationsData.locations);
+          }
+        } else {
+          console.error('Error fetching locations for account:', account.name, await locationsResponse.text());
         }
-      ]
-    };
+      }
+    }
 
-    console.log('Processing mock business data...');
+    console.log('Total locations found:', allLocations.length);
 
     // Store/update locations in database
-    if (mockLocationsData.locations) {
-      for (const location of mockLocationsData.locations) {
-        const locationData = {
-          name: location.title || 'Sample Location',
-          location_id: location.name,
-          address: location.storefrontAddress?.addressLines?.join(' ') || '123 Main Street',
-          city: location.storefrontAddress?.locality || 'Sample City',
-          phone: location.primaryPhone || '',
-          google_account_id: googleAccount.id,
-          website: location.websiteUri || '',
-          group_type: 'business',
-          department: 'main'
-        };
+    let processedCount = 0;
+    
+    for (const location of allLocations) {
+      const locationData = {
+        name: location.title || location.name?.split('/').pop() || 'Unknown Location',
+        location_id: location.name,
+        address: location.storefrontAddress?.addressLines?.join(' ') || '',
+        city: location.storefrontAddress?.locality || '',
+        phone: location.primaryPhone || '',
+        google_account_id: googleAccount.id,
+        website: location.websiteUri || '',
+        group_type: 'business',
+        department: 'main'
+      };
 
-        // Upsert location
-        const { error: locationError } = await supabaseClient
-          .from('business_locations')
-          .upsert(locationData, { 
-            onConflict: 'location_id',
-            ignoreDuplicates: false 
-          });
+      // Upsert location - we'll use a simple insert with ON CONFLICT handling
+      const { error: locationError } = await supabaseClient
+        .from('business_locations')
+        .upsert(locationData, { 
+          onConflict: 'location_id'
+        });
 
-        if (locationError) {
-          console.error('Error upserting location:', locationError);
-        } else {
-          console.log('Successfully stored location:', locationData.name);
-        }
+      if (locationError) {
+        console.error('Error upserting location:', locationError);
+      } else {
+        console.log('Successfully stored location:', locationData.name);
+        processedCount++;
       }
     }
 
     const result = {
       success: true,
-      message: 'Google Business data synced successfully (using sample data)',
+      message: `Successfully synced ${processedCount} business locations from Google Business Profile`,
       timestamp: new Date().toISOString(),
-      accountsCount: mockAccountsData.accounts?.length || 0,
-      note: 'This is using sample data. For real Google Business Profile data, OAuth setup needs to be completed.'
+      accountsCount: accountsData.accounts?.length || 0,
+      locationsCount: processedCount,
+      totalLocationsFound: allLocations.length
     };
 
     return new Response(
