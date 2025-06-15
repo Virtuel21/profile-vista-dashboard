@@ -63,6 +63,13 @@ export type Database = {
             referencedRelation: "google_accounts"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "fk_business_locations_google_account"
+            columns: ["google_account_id"]
+            isOneToOne: false
+            referencedRelation: "google_accounts"
+            referencedColumns: ["id"]
+          },
         ]
       }
       daily_metrics: {
@@ -105,6 +112,13 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "daily_metrics_location_id_fkey"
+            columns: ["location_id"]
+            isOneToOne: false
+            referencedRelation: "business_locations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fk_daily_metrics_location"
             columns: ["location_id"]
             isOneToOne: false
             referencedRelation: "business_locations"
@@ -187,6 +201,13 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "fk_reviews_location"
+            columns: ["location_id"]
+            isOneToOne: false
+            referencedRelation: "business_locations"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "reviews_location_id_fkey"
             columns: ["location_id"]
             isOneToOne: false
@@ -200,7 +221,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      sync_google_business_data: {
+        Args: { account_id: string }
+        Returns: Json
+      }
     }
     Enums: {
       [_ in never]: never
