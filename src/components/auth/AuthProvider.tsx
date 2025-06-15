@@ -30,7 +30,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Handle Google OAuth tokens when user signs in
         if (event === 'SIGNED_IN' && session?.user && session?.provider_token) {
           console.log('Google sign-in detected, storing tokens...');
-          await storeGoogleTokens(session);
+          // Store tokens in background without blocking the auth flow
+          storeGoogleTokens(session).catch(error => {
+            console.error('Failed to store Google tokens:', error);
+            // Don't block the auth flow even if token storage fails
+          });
         }
       }
     );
@@ -52,49 +56,72 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Check if Google account already exists
-      const { data: existingAccount } = await supabase
-        .from('google_accounts')
-        .select('*')
-        .eq('user_id', session.user.id)
-        .single();
+      console.log('Starting Google token storage process...');
 
-      const googleAccountData = {
-        user_id: session.user.id,
-        email: session.user.email || '',
-        google_account_id: session.user.user_metadata?.sub || session.user.id,
-        access_token: session.provider_token,
-        refresh_token: session.provider_refresh_token || null,
-        token_expires_at: session.expires_at ? new Date(session.expires_at * 1000).toISOString() : null,
-        updated_at: new Date().toISOString()
-      };
+      // Set a timeout to prevent hanging
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Token storage timeout')), 10000); // 10 second timeout
+      });
 
-      if (existingAccount) {
-        // Update existing account with new tokens
-        const { error } = await supabase
+      const storagePromise = (async () => {
+        // Check if Google account already exists
+        const { data: existingAccount, error: fetchError } = await supabase
           .from('google_accounts')
-          .update(googleAccountData)
-          .eq('id', existingAccount.id);
+          .select('*')
+          .eq('user_id', session.user.id)
+          .maybeSingle(); // Use maybeSingle to avoid errors when no record found
 
-        if (error) {
-          console.error('Error updating Google account tokens:', error);
-        } else {
-          console.log('Successfully updated Google account tokens');
+        if (fetchError) {
+          console.error('Error fetching existing Google account:', fetchError);
+          throw fetchError;
         }
-      } else {
-        // Create new Google account record
-        const { error } = await supabase
-          .from('google_accounts')
-          .insert([googleAccountData]);
 
-        if (error) {
-          console.error('Error creating Google account:', error);
+        const googleAccountData = {
+          user_id: session.user.id,
+          email: session.user.email || '',
+          google_account_id: session.user.user_metadata?.sub || session.user.id,
+          access_token: session.provider_token,
+          refresh_token: session.provider_refresh_token || null,
+          token_expires_at: session.expires_at ? new Date(session.expires_at * 1000).toISOString() : null,
+          updated_at: new Date().toISOString()
+        };
+
+        if (existingAccount) {
+          console.log('Updating existing Google account with new tokens');
+          // Update existing account with new tokens
+          const { error } = await supabase
+            .from('google_accounts')
+            .update(googleAccountData)
+            .eq('id', existingAccount.id);
+
+          if (error) {
+            console.error('Error updating Google account tokens:', error);
+            throw error;
+          } else {
+            console.log('Successfully updated Google account tokens');
+          }
         } else {
-          console.log('Successfully created Google account with tokens');
+          console.log('Creating new Google account record');
+          // Create new Google account record
+          const { error } = await supabase
+            .from('google_accounts')
+            .insert([googleAccountData]);
+
+          if (error) {
+            console.error('Error creating Google account:', error);
+            throw error;
+          } else {
+            console.log('Successfully created Google account with tokens');
+          }
         }
-      }
+      })();
+
+      // Race between storage and timeout
+      await Promise.race([storagePromise, timeoutPromise]);
+      
     } catch (error) {
       console.error('Error storing Google tokens:', error);
+      // Don't rethrow - we don't want to block the auth flow
     }
   };
 
