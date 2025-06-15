@@ -29,7 +29,7 @@ export function GoogleConnect() {
   const [businessLocations, setBusinessLocations] = useState<BusinessLocation[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [initializing, setInitializing] = useState(true);
-  const { user } = useAuth();
+  const { user, session } = useAuth();
   const { toast } = useToast();
 
   useEffect(() => {
@@ -102,107 +102,39 @@ export function GoogleConnect() {
   const syncBusinessData = async () => {
     setSyncing(true);
     try {
-      // Call edge function to sync data
+      // Get the session token for authorization
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      
+      if (!currentSession?.access_token) {
+        throw new Error('No valid session found');
+      }
+
+      // Call edge function with authorization header
       const { data, error } = await supabase.functions.invoke('sync-google-business', {
-        body: { userId: user?.id }
+        body: { userId: user?.id },
+        headers: {
+          Authorization: `Bearer ${currentSession.access_token}`,
+        },
       });
 
       if (error) throw error;
 
       toast({
         title: "Success",
-        description: "Business data synced successfully",
+        description: data.message || "Business data synced successfully",
       });
 
-      fetchBusinessLocations();
+      // Refresh the business locations
+      await fetchBusinessLocations();
     } catch (error) {
+      console.error('Sync error:', error);
       toast({
-        title: "Sync Complete",
-        description: "Demo data has been updated with sample metrics",
+        title: "Sync Error",
+        description: error.message || "Failed to sync business data. Make sure you have Google Business Profile access.",
+        variant: "destructive",
       });
-      
-      // Add demo business location and metrics
-      await addDemoData();
     }
     setSyncing(false);
-  };
-
-  const addDemoData = async () => {
-    if (googleAccounts.length === 0) return;
-
-    const demoLocation = {
-      name: 'Main Business Location',
-      location_id: 'demo_location_' + Date.now(),
-      address: '123 Business St',
-      city: 'Business City',
-      phone: '+1-555-0123',
-      google_account_id: googleAccounts[0].id,
-      website: 'https://mybusiness.com',
-      group_type: 'business',
-      department: 'main'
-    };
-
-    await supabase.from('business_locations').insert([demoLocation]);
-
-    // Add some demo metrics
-    const { data: locations } = await supabase
-      .from('business_locations')
-      .select('id')
-      .eq('google_account_id', googleAccounts[0].id);
-
-    if (locations && locations.length > 0) {
-      const locationId = locations[0].id;
-      const today = new Date();
-      const demoMetrics = [];
-
-      for (let i = 0; i < 30; i++) {
-        const date = new Date(today);
-        date.setDate(date.getDate() - i);
-        
-        demoMetrics.push({
-          location_id: locationId,
-          date: date.toISOString().split('T')[0],
-          views: Math.floor(Math.random() * 500) + 100,
-          searches: Math.floor(Math.random() * 200) + 50,
-          actions: Math.floor(Math.random() * 100) + 20,
-          calls: Math.floor(Math.random() * 50) + 5,
-          direction_requests: Math.floor(Math.random() * 80) + 10,
-          website_clicks: Math.floor(Math.random() * 150) + 30
-        });
-      }
-
-      await supabase.from('daily_metrics').insert(demoMetrics);
-
-      // Add demo reviews
-      const demoReviews = [
-        {
-          location_id: locationId,
-          google_review_id: 'review_1',
-          author_name: 'John Smith',
-          rating: 5,
-          comment: 'Excellent service and great staff!',
-          review_date: new Date().toISOString(),
-        },
-        {
-          location_id: locationId,
-          google_review_id: 'review_2',
-          author_name: 'Sarah Johnson',
-          rating: 4,
-          comment: 'Very satisfied with the quality.',
-          review_date: new Date(Date.now() - 86400000).toISOString(),
-        },
-        {
-          location_id: locationId,
-          google_review_id: 'review_3',
-          author_name: 'Mike Wilson',
-          rating: 5,
-          comment: 'Highly recommend this business!',
-          review_date: new Date(Date.now() - 172800000).toISOString(),
-        }
-      ];
-
-      await supabase.from('reviews').insert(demoReviews);
-    }
   };
 
   if (initializing) {
@@ -247,7 +179,7 @@ export function GoogleConnect() {
                 size="sm"
               >
                 <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-                {syncing ? 'Syncing...' : 'Sync Data'}
+                {syncing ? 'Syncing...' : 'Sync Real Data'}
               </Button>
             </div>
 
