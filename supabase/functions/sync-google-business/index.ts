@@ -45,7 +45,7 @@ serve(async (req) => {
       );
     }
 
-    // Get access token from Supabase Auth (since user signed in with Google)
+    // Get access token from request headers
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) {
       return new Response(
@@ -80,13 +80,43 @@ serve(async (req) => {
       );
     }
 
-    // Get provider token from user metadata
-    const providerToken = user.user_metadata?.provider_token;
+    // Try to get provider token from user metadata first, then from app metadata
+    let providerToken = user.user_metadata?.provider_token;
+    
+    // If not found in user_metadata, try app_metadata
+    if (!providerToken) {
+      providerToken = user.app_metadata?.provider_token;
+    }
+
+    // If still not found, get it from the session using the service role client
+    if (!providerToken) {
+      console.log('Provider token not found in metadata, attempting to get from session...');
+      
+      // Use the service role client to get the session with provider tokens
+      const { data: sessionData, error: sessionError } = await supabaseClient.auth.admin.getUserById(userId);
+      
+      if (sessionError) {
+        console.error('Error getting user session:', sessionError);
+      } else if (sessionData?.user?.identities) {
+        // Look for Google identity with access token
+        const googleIdentity = sessionData.user.identities.find(
+          (identity: any) => identity.provider === 'google'
+        );
+        
+        if (googleIdentity?.access_token) {
+          providerToken = googleIdentity.access_token;
+          console.log('Found provider token in identity data');
+        }
+      }
+    }
     
     if (!providerToken) {
-      console.error('No provider token found');
+      console.error('No Google access token available in any location');
       return new Response(
-        JSON.stringify({ error: 'No Google access token available' }),
+        JSON.stringify({ 
+          error: 'No Google access token available. Please sign out and sign back in with Google.',
+          details: 'Provider token not found in user metadata, app metadata, or identity data'
+        }),
         { 
           status: 400,
           headers: { 
@@ -111,12 +141,13 @@ serve(async (req) => {
     );
 
     if (!accountsResponse.ok) {
-      console.error('Failed to fetch accounts:', await accountsResponse.text());
+      const errorText = await accountsResponse.text();
+      console.error('Failed to fetch accounts:', errorText);
       return new Response(
         JSON.stringify({ 
           error: 'Failed to fetch Google Business accounts',
           status: accountsResponse.status,
-          details: await accountsResponse.text()
+          details: errorText
         }),
         { 
           status: 400,
@@ -176,41 +207,16 @@ serve(async (req) => {
             if (locationError) {
               console.error('Error upserting location:', locationError);
             }
-
-            // Fetch insights/metrics for this location
-            try {
-              const insightsResponse = await fetch(
-                `https://mybusinessbusinessinformation.googleapis.com/v1/${location.name}/insights`,
-                {
-                  headers: {
-                    'Authorization': `Bearer ${providerToken}`,
-                    'Content-Type': 'application/json',
-                  },
-                }
-              );
-
-              if (insightsResponse.ok) {
-                const insightsData = await insightsResponse.json();
-                console.log('Insights data for', location.title, ':', insightsData);
-                
-                // Process and store insights data
-                // Note: The actual structure may vary based on Google's API
-                if (insightsData.insights) {
-                  // Process insights and store as daily metrics
-                  // This is a simplified example - you'd need to adapt based on actual API response
-                }
-              }
-            } catch (insightsError) {
-              console.log('Insights not available for location:', location.title);
-            }
           }
         }
+      } else {
+        console.error('Failed to fetch locations:', await locationsResponse.text());
       }
     }
 
     const result = {
       success: true,
-      message: 'Real Google Business data synced successfully',
+      message: 'Google Business data synced successfully',
       timestamp: new Date().toISOString(),
       accountsCount: accountsData.accounts?.length || 0
     };
